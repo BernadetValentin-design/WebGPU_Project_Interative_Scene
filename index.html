@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebGPU Scene Editor</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: #1d2021;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #3c3836;
+      border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #504945;
+    }
+
+    .slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 6px;
+      background: #3c3836;
+      border-radius: 3px;
+      outline: none;
+      opacity: 0.7;
+      transition: opacity .2s;
+    }
+
+    .slider-thumb:hover {
+      opacity: 1;
+    }
+
+    .slider-thumb::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #ebdbb2;
+      cursor: pointer;
+    }
+
+    .slider-thumb::-moz-range-thumb {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #ebdbb2;
+      cursor: pointer;
+    }
+  </style>
+</head>
+
+<body class="font-mono bg-[#1d2021] text-[#ebdbb2] overflow-hidden select-none">
+  <div id="container" class="flex w-screen h-screen">
+    <div id="canvas-container" class="relative flex-1 bg-black flex items-center justify-center overflow-hidden">
+      <canvas id="canvas" class="block w-full h-full"></canvas>
+      <div id="loading" class="absolute inset-0 flex items-center justify-center bg-black/80 z-50">
+        <span class="text-xl animate-pulse">Initializing WebGPU...</span>
+      </div>
+      <div id="error-message"
+        class="absolute bottom-4 left-4 right-4 bg-red-900/80 text-white p-4 rounded hidden z-50 whitespace-pre-wrap">
+      </div>
+
+      <div class="absolute top-4 left-4 text-xs opacity-50 pointer-events-none">
+        <div id="fps">FPS: 0</div>
+        <div>Cam: Drag to Rotate</div>
+        <div>Move: ZQSD</div>
+        <div>Zoom: Mouse Wheel</div>
+      </div>
+    </div>
+
+    <div id="editor-panel" class="w-[360px] flex flex-col border-l border-[#3c3836] bg-[#282828]">
+      <div class="p-4 border-b border-[#3c3836] bg-[#1d2021]">
+        <h1 class="text-lg font-bold mb-2">Scene Editor</h1>
+        <div class="flex gap-2">
+          <button onclick="addShape(0)"
+            class="flex-1 py-2 bg-[#d65d0e] hover:bg-[#fe8019] text-[#282828] font-bold rounded shadow transition text-sm">
+            + Sphere
+          </button>
+          <button onclick="addShape(1)"
+            class="flex-1 py-2 bg-[#689d6a] hover:bg-[#8ec07c] text-[#282828] font-bold rounded shadow transition text-sm">
+            + Box
+          </button>
+          <button onclick="addShape(2)"
+            class="flex-1 py-2 bg-[#458588] hover:bg-[#83a598] text-[#282828] font-bold rounded shadow transition text-sm">
+            + Torus
+          </button>
+        </div>
+      </div>
+
+      <div id="scene-list" class="flex-1 overflow-y-auto p-4 space-y-4">
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    const MAX_SHAPES = 32;
+    const SHAPE_STRUCT_SIZE = 48;
+
+
+    let shapes = [
+      { type: 0, pos: [1.5, 0, 0], params: [0.5, 0, 0], color: [1.0, 0.3, 0.3], active: 1 },
+      { type: 1, pos: [0, 0, 0], params: [0.3, 0.4, 0.3], color: [0.3, 1.0, 0.3], active: 1 },
+      { type: 2, pos: [-1.5, 0.5, 1.0], params: [0.4, 0.15, 0], color: [0.3, 0.3, 1.0], active: 1 }
+    ];
+
+    // WebGPU Globals
+    let device, context, pipeline, uniformBuffer, shapeBuffer, bindGroup;
+    let start_time = performance.now();
+    let last_frame = start_time;
+
+    // Camera State
+    let camera = {
+      yaw: 0,
+      pitch: 0.5,
+      dist: 4.0,
+      target: { x: 0, y: 0, z: 0 },
+      keys: { w: false, a: false, s: false, d: false },
+      isDragging: false,
+      lastX: 0,
+      lastY: 0
+    };
+
+    const canvas = document.getElementById("canvas");
+
+    // -- UI Logic --
+    // Input Handling for Camera
+    canvas.addEventListener("mousedown", (e) => {
+      camera.isDragging = true;
+      camera.lastX = e.clientX;
+      camera.lastY = e.clientY;
+    });
+
+    window.addEventListener("mouseup", () => {
+      camera.isDragging = false;
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (!camera.isDragging) return;
+
+      const deltaX = e.clientX - camera.lastX;
+      const deltaY = e.clientY - camera.lastY;
+
+      camera.lastX = e.clientX;
+      camera.lastY = e.clientY;
+
+
+      const sensitivity = 0.01;
+
+
+      camera.yaw -= deltaX * sensitivity;
+      camera.pitch += deltaY * sensitivity;
+
+
+      camera.pitch = Math.max(0.1, Math.min(Math.PI / 2 - 0.1, camera.pitch));
+    });
+
+    // Zoom
+    canvas.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const zoomSpeed = 0.005;
+      camera.dist += e.deltaY * zoomSpeed;
+      camera.dist = Math.max(1.0, Math.min(20.0, camera.dist));
+    });
+
+    // Movement (ZQSD/WASD)
+    window.addEventListener("keydown", (e) => {
+      // Using code to support physical layout (ZQSD on Azerty uses KeyW location etc if needed, 
+      // but 'z' key on Azerty sends 'KeyW' code ONLY IF system layout maps it. 
+      // Actually simpler to check key chars for explicit "zqsd" support request.
+      const key = e.key.toLowerCase();
+      if (key === 'z' || key === 'w') camera.keys.w = true;
+      if (key === 's') camera.keys.s = true;
+      if (key === 'q' || key === 'a') camera.keys.a = true;
+      if (key === 'd') camera.keys.d = true;
+    });
+
+    window.addEventListener("keyup", (e) => {
+      const key = e.key.toLowerCase();
+      if (key === 'z' || key === 'w') camera.keys.w = false;
+      if (key === 's') camera.keys.s = false;
+      if (key === 'q' || key === 'a') camera.keys.a = false;
+      if (key === 'd') camera.keys.d = false;
+    });
+
+    window.addShape = (type) => {
+      if (shapes.length >= MAX_SHAPES) {
+        alert("Max shapes reached!");
+        return;
+      }
+
+      let newShape = {
+        type: type,
+        pos: [0, 0, 0],
+        params: [0.5, 0.5, 0.5],
+        color: [Math.random(), Math.random(), Math.random()],
+        active: 1
+      };
+
+
+      if (type === 0) newShape.params = [0.5, 0, 0];
+      if (type === 1) newShape.params = [0.4, 0.4, 0.4];
+      if (type === 2) newShape.params = [0.5, 0.2, 0];
+
+      shapes.push(newShape);
+      renderUI();
+      updateShapeBuffer();
+    };
+
+    window.removeShape = (index) => {
+      shapes.splice(index, 1);
+      renderUI();
+      updateShapeBuffer();
+    };
+
+    window.updateShapeVal = (index, key, axis, val) => {
+      shapes[index][key][axis] = parseFloat(val);
+      updateShapeBuffer();
+    };
+
+    window.updateColor = (index, hex) => {
+      const r = parseInt(hex.substr(1, 2), 16) / 255;
+      const g = parseInt(hex.substr(3, 2), 16) / 255;
+      const b = parseInt(hex.substr(5, 2), 16) / 255;
+      shapes[index].color = [r, g, b];
+      updateShapeBuffer();
+    };
+
+    function rgbToHex(arr) {
+      const toHex = (c) => {
+        const hex = Math.round(c * 255).toString(16);
+        return hex.length === 1 ? "0" + hex : hex;
+      };
+      return "#" + toHex(arr[0]) + toHex(arr[1]) + toHex(arr[2]);
+    }
+
+    function renderUI() {
+      const container = document.getElementById("scene-list");
+      container.innerHTML = "";
+
+      shapes.forEach((shape, i) => {
+        const typeNames = ["Sphere", "Box", "Torus"];
+        const colorHex = rgbToHex(shape.color);
+
+        const div = document.createElement("div");
+        div.className = "bg-[#3c3836] rounded p-3 text-sm shadow-md";
+
+        // Helper to create a slider row
+        const createSlider = (label, val, onInput, min, max, step) => `
+                <div class="flex items-center gap-2 mb-1">
+                    <span class="w-4 text-[#928374] text-xs font-bold">${label}</span>
+                    <input type="range" min="${min}" max="${max}" step="${step}" value="${val}" class="flex-1 h-1 bg-[#1d2021] rounded-lg appearance-none cursor-pointer slider-thumb" oninput="${onInput}; this.nextElementSibling.value = this.value">
+                    <input type="number" min="${min}" max="${max}" step="${step}" value="${val}" class="w-12 bg-transparent text-right text-xs text-[#ebdbb2] border-none focus:ring-0 appearance-none" onchange="${onInput}; this.previousElementSibling.value = this.value">
+                </div>
+            `;
+
+        let paramsHtml = "";
+        if (shape.type === 0) { // Sphere
+          paramsHtml += createSlider("R", shape.params[0], `updateShapeVal(${i}, 'params', 0, this.value)`, 0.1, 3.0, 0.05);
+        } else if (shape.type === 1) { // Box
+          paramsHtml += createSlider("W", shape.params[0], `updateShapeVal(${i}, 'params', 0, this.value)`, 0.1, 3.0, 0.05);
+          paramsHtml += createSlider("H", shape.params[1], `updateShapeVal(${i}, 'params', 1, this.value)`, 0.1, 3.0, 0.05);
+          paramsHtml += createSlider("D", shape.params[2], `updateShapeVal(${i}, 'params', 2, this.value)`, 0.1, 3.0, 0.05);
+        } else if (shape.type === 2) { // Torus
+          paramsHtml += createSlider("R", shape.params[0], `updateShapeVal(${i}, 'params', 0, this.value)`, 0.1, 3.0, 0.05);
+          paramsHtml += createSlider("r", shape.params[1], `updateShapeVal(${i}, 'params', 1, this.value)`, 0.01, 1.0, 0.01);
+        }
+
+        div.innerHTML = `
+              <div class="flex justify-between items-center mb-2 pb-2 border-b border-[#504945]">
+                 <span class="font-bold text-[#ebdbb2]">${typeNames[shape.type]} ${i + 1}</span>
+                 <button onclick="removeShape(${i})" class="text-red-400 hover:text-red-300 px-2">✕</button>
+              </div>
+              
+              <div class="mb-3">
+                 <div class="text-[#928374] text-xs mb-1 uppercase tracking-wider">Position</div>
+                 ${createSlider("X", shape.pos[0], `updateShapeVal(${i}, 'pos', 0, this.value)`, -5, 5, 0.1)}
+                 ${createSlider("Y", shape.pos[1], `updateShapeVal(${i}, 'pos', 1, this.value)`, -5, 5, 0.1)}
+                 ${createSlider("Z", shape.pos[2], `updateShapeVal(${i}, 'pos', 2, this.value)`, -5, 5, 0.1)}
+              </div>
+
+              <div class="mb-3">
+                 <div class="text-[#928374] text-xs mb-1 uppercase tracking-wider">Dimensions</div>
+                 ${paramsHtml}
+              </div>
+
+               <!-- Color -->
+              <div class="flex items-center gap-2 mt-2 pt-2 border-t border-[#504945]">
+                 <span class="w-8 text-[#928374] text-xs uppercase tracking-wider">Color</span>
+                 <input type="color" value="${colorHex}" oninput="updateColor(${i}, this.value)" class="flex-1 h-6 bg-transparent cursor-pointer rounded">
+              </div>
+            `;
+        container.appendChild(div);
+      });
+    }
+
+    // -- WebGPU Logic --
+
+    async function init() {
+      if (!navigator.gpu) {
+        document.getElementById("error-message").classList.remove("hidden");
+        document.getElementById("error-message").textContent = "WebGPU not supported on this browser.";
+        return;
+      }
+
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) {
+        document.getElementById("error-message").classList.remove("hidden");
+        document.getElementById("error-message").textContent = "No GPU adapter found.";
+        return;
+      }
+
+      device = await adapter.requestDevice();
+      context = canvas.getContext("webgpu");
+      const format = navigator.gpu.getPreferredCanvasFormat();
+      context.configure({ device, format });
+
+      const response = await fetch("./shaders/raymarch_basic.wgsl");
+      const shaderCode = await response.text();
+
+      const shaderModule = device.createShaderModule({ code: shaderCode + vertexShaderSource() });
+
+
+      uniformBuffer = device.createBuffer({
+        size: 64,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      });
+
+
+      shapeBuffer = device.createBuffer({
+        size: MAX_SHAPES * SHAPE_STRUCT_SIZE,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      });
+
+
+      const bindGroupLayout = device.createBindGroupLayout({
+        entries: [
+          { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+          { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } }
+        ]
+      });
+
+      const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+
+      pipeline = device.createRenderPipeline({
+        layout: pipelineLayout,
+        vertex: {
+          module: shaderModule,
+          entryPoint: "vs_main"
+        },
+        fragment: {
+          module: shaderModule,
+          entryPoint: "fs_main",
+          targets: [{ format }]
+        },
+        primitive: { topology: "triangle-list" }
+      });
+
+      bindGroup = device.createBindGroup({
+        layout: bindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: uniformBuffer } },
+          { binding: 1, resource: { buffer: shapeBuffer } }
+        ]
+      });
+
+
+      document.getElementById("loading").classList.add("hidden");
+      renderUI();
+      updateShapeBuffer();
+      resize();
+      requestAnimationFrame(render);
+    }
+
+    function vertexShaderSource() {
+      return `
+         @vertex
+         fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> @builtin(position) vec4<f32> {
+            var pos = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+            return vec4<f32>(pos[vertexIndex], 0.0, 1.0);
+         }
+         struct Uniforms {
+           resolution: vec2<f32>, time: f32, deltaTime: f32, mouse: vec4<f32>, cam_target: vec4<f32>,
+         }
+         `;
+    }
+
+    function updateShapeBuffer() {
+      const data = new Float32Array(MAX_SHAPES * 12);
+
+      shapes.forEach((s, i) => {
+        const offset = i * 12;
+        data[offset + 0] = s.pos[0];
+        data[offset + 1] = s.pos[1];
+        data[offset + 2] = s.pos[2];
+        data[offset + 3] = s.type;
+
+        data[offset + 4] = s.params[0];
+        data[offset + 5] = s.params[1];
+        data[offset + 6] = s.params[2];
+        data[offset + 7] = 1.0;
+
+        data[offset + 8] = s.color[0];
+        data[offset + 9] = s.color[1];
+        data[offset + 10] = s.color[2];
+        data[offset + 11] = 0.0;
+      });
+
+      for (let i = shapes.length; i < MAX_SHAPES; i++) {
+        data[i * 12 + 7] = 0.0; // Inactive
+      }
+
+      device.queue.writeBuffer(shapeBuffer, 0, data);
+    }
+
+    function render(time) {
+      const now = performance.now();
+      const dt = (now - last_frame) / 1000;
+      const elapsed = (now - start_time) / 1000;
+      last_frame = now;
+
+      // Handle Movement
+      const moveSpeed = 5.0 * dt;
+      const sinYaw = Math.sin(camera.yaw);
+      const cosYaw = Math.cos(camera.yaw);
+
+      const fwdX = sinYaw;
+      const fwdZ = cosYaw;
+      const rightX = cosYaw;
+      const rightZ = -sinYaw;
+
+      if (camera.keys.w) {
+        camera.target.x -= fwdX * moveSpeed;
+        camera.target.z -= fwdZ * moveSpeed;
+      }
+      if (camera.keys.s) {
+        camera.target.x += fwdX * moveSpeed;
+        camera.target.z += fwdZ * moveSpeed;
+      }
+      if (camera.keys.d) {
+        camera.target.x += rightX * moveSpeed;
+        camera.target.z += rightZ * moveSpeed;
+      }
+      if (camera.keys.a) {
+        camera.target.x -= rightX * moveSpeed;
+        camera.target.z -= rightZ * moveSpeed;
+      }
+
+      const uniformData = new Float32Array([
+        canvas.width, canvas.height,
+        elapsed,
+        dt,
+        camera.yaw, camera.pitch, camera.dist, 0,
+        camera.target.x, camera.target.y, camera.target.z, 0
+      ]);
+      device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: context.getCurrentTexture().createView(),
+          loadOp: "clear",
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          storeOp: "store"
+        }]
+      });
+
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.draw(3);
+      pass.end();
+
+      device.queue.submit([encoder.finish()]);
+
+      document.getElementById("fps").textContent = `FPS: ${Math.round(1 / dt)}`;
+
+      requestAnimationFrame(render);
+    }
+
+    function resize() {
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = canvas.clientWidth * dpr;
+      canvas.height = canvas.clientHeight * dpr;
+    }
+    window.addEventListener("resize", resize);
+
+    init();
+  </script>
+</body>
+
+</html>

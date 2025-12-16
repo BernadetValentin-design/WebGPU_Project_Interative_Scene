@@ -1,0 +1,9 @@
+{
+  "shaders": [
+    {
+      "file": "raymarch_basic.wgsl",
+      "name": "Ray Marching - Basic",
+      "description": "Introduction to ray marching with simple primitives, CSG operations, and basic lighting"
+    }
+  ]
+}
