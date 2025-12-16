@@ -1,6 +1,5 @@
 # WebGPU Scene Editor
 
-> **Note:** Replace this image with a screenshot or GIF of your running application!
 ![App Preview](screenshot2.png)
 
 ### [**Launch Live Demo**](https://your-username.github.io/your-repo-name/)
