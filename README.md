@@ -2,7 +2,7 @@
 
 ![App Preview](screenshot2.png)
 
-### [**Launch Live Demo**](https://your-username.github.io/your-repo-name/)
+### [**Launch Live Demo**](https://bernadetvalentin-design.github.io/WebGPU_Project_Interative_Scene/)
 
 A high-performance interactive 3D scene editor built from scratch using **WebGPU** and **WGSL** raymarching. Create, manipulate, and blend geometric primitives in real-time right in your browser.
 
